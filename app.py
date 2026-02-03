@@ -10,7 +10,6 @@ import math
 # --- 1. CONFIGURATIE & CSS ---
 st.set_page_config(page_title="Cover Hunter Pro", page_icon="🟢", layout="wide")
 
-# Spotify-achtige styling
 spotify_css = """
 <style>
     .stApp { background-color: #121212; color: white; }
@@ -21,6 +20,11 @@ spotify_css = """
     div.stButton > button:hover { background-color: #1ed760; color: white; transform: scale(1.05); }
     .stTextInput > div > div > input { background-color: #282828; color: white; border-radius: 20px; border: 1px solid #333; }
     h1, h2, h3 { color: white !important; font-family: 'Circular', sans-serif; }
+    /* Link styling */
+    a { color: #1DB954 !important; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    /* Radio buttons */
+    .stRadio > div { color: white; }
 </style>
 """
 st.markdown(spotify_css, unsafe_allow_html=True)
@@ -28,14 +32,30 @@ st.markdown(spotify_css, unsafe_allow_html=True)
 # --- 2. API KEYS & INSTELLINGEN ---
 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 
-# --- 3. HELPER FUNCTIES (NU MET ARTIEST DETECTIE) ---
+# --- 3. HELPER FUNCTIES ---
 
-def clean_name(url_part):
+def clean_coreradio_name(url_part):
+    """Maakt CoreRadio URL's schoon naar een titel"""
     name = url_part.split('/')[-1].replace('.html', '')
     name = re.sub(r'^\d+-', '', name).replace('-', ' ')
-    trash = ['deluxe edition', 'remastered', '2024', '2025', '2026', 'web', 'flac', '320', 'kbps', 'ep', 'single']
+    trash = ['deluxe edition', 'remastered', '2024', '2025', '2026', 'web', 'flac', '320', 'kbps', 'ep', 'single', 'full album']
     for t in trash: name = re.sub(fr'\b{t}\b', '', name, flags=re.IGNORECASE)
     return re.sub(' +', ' ', name).strip()
+
+def clean_deathgrind_title(title):
+    """Maakt DeathGrind titels schoon (verwijdert jaartallen en haakjes)"""
+    # DeathGrind formaat is vaak: "Band – Album (Year) [Format]"
+    # Stap 1: Verwijder alles tussen () en []
+    clean = re.sub(r'\(.*?\)', '', title)
+    clean = re.sub(r'\[.*?\]', '', clean)
+    # Stap 2: Vervang rare streepjes
+    clean = clean.replace('–', '-').replace('—', '-')
+    # Stap 3: Verwijder jaartallen en extenties
+    clean = re.sub(r'\b\d{4}\b', '', clean)
+    clean = clean.replace('mp3', '').replace('flac', '').replace('rar', '')
+    return re.sub(' +', ' ', clean).strip()
+
+# --- ZOEKMACHINES (De plekken waar we de Art zoeken) ---
 
 def search_itunes(term):
     try:
@@ -44,25 +64,12 @@ def search_itunes(term):
         if d['resultCount'] > 0:
             item = d['results'][0]
             img = item['artworkUrl100'].replace('100x100bb', '10000x10000bb')
-            artist = item['artistName'] # We pakken de echte artiestennaam!
+            artist = item['artistName']
             return img, "iTunes (4K)", artist
     except: pass
     return None, None, None
 
-def search_deezer(term):
-    try:
-        r = requests.get("https://api.deezer.com/search", params={"q": term, "limit": 1}, timeout=5)
-        d = r.json()
-        if 'data' in d and len(d['data']) > 0:
-            item = d['data'][0]
-            artist = item['artist']['name'] # Echte artiestennaam
-            if 'cover_xl' in item: return item['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)", artist
-            if 'album' in item: return item['album']['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)", artist
-    except: pass
-    return None, None, None
-
 def search_bandcamp(term):
-    # Bandcamp geeft lastig de losse artiest terug in search, dus we gokken hier niet
     try:
         search_url = f"https://bandcamp.com/search?q={quote(term)}&item_type=a"
         r = requests.get(search_url, headers=headers, timeout=5)
@@ -72,7 +79,6 @@ def search_bandcamp(term):
             img_div = result.find('div', class_='art')
             if img_div and img_div.find('img'):
                 src = img_div.find('img')['src'].replace('_7.jpg', '_0.jpg')
-                # Probeer artiest te vinden in tekst
                 artist_div = result.find('div', class_='subhead')
                 artist = artist_div.text.strip().replace('by ', '') if artist_div else None
                 return src, "Bandcamp (Original)", artist
@@ -88,7 +94,19 @@ def search_amazon(term):
             img = soup.find('img', class_='s-image')
             if img and 'src' in img.attrs:
                 src = re.sub(r'\._AC_.*?\.', '.', img['src'])
-                return src, "Amazon Music (HQ)", None # Amazon geeft geen makkelijke artiest info
+                return src, "Amazon Music (HQ)", None
+    except: pass
+    return None, None, None
+
+def search_deezer(term):
+    try:
+        r = requests.get("https://api.deezer.com/search", params={"q": term, "limit": 1}, timeout=5)
+        d = r.json()
+        if 'data' in d and len(d['data']) > 0:
+            item = d['data'][0]
+            artist = item['artist']['name']
+            if 'cover_xl' in item: return item['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)", artist
+            if 'album' in item: return item['album']['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)", artist
     except: pass
     return None, None, None
 
@@ -100,53 +118,49 @@ def search_musicbrainz(term):
         d = r.json()
         if 'releases' in d and len(d['releases']) > 0:
             release = d['releases'][0]
-            release_id = release['id']
-            # Artiest pakken
             artist = release['artist-credit'][0]['name'] if 'artist-credit' in release else None
-            
-            cover_url = f"https://coverartarchive.org/release/{release_id}/front"
-            head_req = requests.head(cover_url)
-            if head_req.status_code in [200, 302, 307]:
+            cover_url = f"https://coverartarchive.org/release/{release['id']}/front"
+            if requests.head(cover_url).status_code in [200, 302, 307]:
                  return cover_url, "MusicBrainz (Archive)", artist
     except: pass
     return None, None, None
 
+# --- DE MASTER ZOEKFUNCTIE ---
 def get_best_artwork_and_artist(term):
-    # Probeer iTunes (Beste metadata)
+    # 1. iTunes (Vaak beste kwaliteit)
     img, src, artist = search_itunes(term)
     if img: return img, src, artist
     
-    # Probeer Deezer
-    img, src, artist = search_deezer(term)
-    if img: return img, src, artist
-    
-    # Probeer MusicBrainz
-    img, src, artist = search_musicbrainz(term)
-    if img: return img, src, artist
-
-    # Probeer Bandcamp (Vaak goede plaatjes, soms artiest)
+    # 2. Bandcamp (Top voor metal/underground)
     img, src, artist = search_bandcamp(term)
-    if img: return img, src, artist # Artist kan None zijn
+    if img: return img, src, artist
     
-    # Probeer Amazon (Goede plaatjes, geen artiest info)
+    # 3. Amazon (Hoge res)
     img, src, artist = search_amazon(term)
     if img: return img, src, None 
     
+    # 4. Deezer (Betrouwbaar)
+    img, src, artist = search_deezer(term)
+    if img: return img, src, artist
+    
+    # 5. MusicBrainz (Backup)
+    img, src, artist = search_musicbrainz(term)
+    if img: return img, src, artist
+
     return None, None, None
 
-# --- 4. RECOMMENDATION ENGINE ---
-
+# --- 4. RECOMMENDATION ENGINE (LAST.FM) ---
 def get_similar_artists(artist_name, api_key):
     if not api_key or not artist_name: return []
     try:
+        clean = artist_name.split(' feat')[0].split(' (')[0].strip()
         url = "http://ws.audioscrobbler.com/2.0/"
-        params = {"method": "artist.getsimilar", "artist": artist_name, "api_key": api_key, "format": "json", "limit": 4}
+        params = {"method": "artist.getsimilar", "artist": clean, "api_key": api_key, "format": "json", "limit": 4}
         r = requests.get(url, params=params, timeout=3)
         data = r.json()
         recs = []
         if 'similarartists' in data and 'artist' in data['similarartists']:
             for art in data['similarartists']['artist']:
-                # We zoeken snel een plaatje voor de recommendation (alleen plaatje, artiest boeit niet)
                 img, _, _ = get_best_artwork_and_artist(art['name']) 
                 recs.append({"name": art['name'], "image": img if img else "https://via.placeholder.com/300x300.png?text=No+Image"})
         return recs
@@ -161,18 +175,26 @@ if 'found_items' not in st.session_state:
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/2048px-Spotify_logo_without_text.svg.png", width=50)
     st.title("Cover Hunter")
-    api_key_input = st.text_input("Last.fm API Key", type="password") # Hier plakken!
+    
+    # Bron Selectie
+    st.subheader("Selecteer Bron:")
+    source_site = st.radio("Waar wil je zoeken?", ["CoreRadio", "DeathGrind.club"])
+
+    api_key_input = st.text_input("Last.fm API Key", type="password")
     
     with st.form("search_form"):
-        url_input = st.text_input("CoreRadio URL", placeholder="coreradio.online")
-        pages = st.slider("Pagina's", 1, 5, 1)
+        # Placeholder verandert op basis van selectie
+        ph = "coreradio.online" if source_site == "CoreRadio" else "deathgrind.club"
+        url_input = st.text_input(f"{source_site} URL (Optioneel)", placeholder=ph)
+        pages = st.slider("Aantal pagina's", 1, 5, 1)
         submitted = st.form_submit_button("Start Search")
 
 # --- APP START ---
 
 if not submitted and not st.session_state['found_items']:
     st.markdown("### 👋 Welkom bij Cover Hunter")
-    st.write("Vul links je Last.fm Key in en start het zoeken!")
+    st.write(f"Je zoekt nu op: **{source_site}**.")
+    st.write("De app pakt de albumtitels van deze site en zoekt automatisch de beste kwaliteit covers op iTunes, Bandcamp en Amazon.")
 
 if submitted or st.session_state['found_items']:
     tab1, tab2 = st.tabs(["🎵 Gevonden Albums", "🔥 Recommendations"])
@@ -182,11 +204,19 @@ if submitted or st.session_state['found_items']:
         status_text = st.empty()
         bar = st.progress(0)
         
-        target = url_input.strip() if url_input else "https://coreradio.online"
-        if not target.startswith("http"): target = "https://" + target
-        urls = [target] if "page" not in target and len(target) > 30 else [f"https://coreradio.online/page/{i}/" for i in range(1, pages+1)]
+        # URL Logic op basis van bron
+        if source_site == "CoreRadio":
+            base_url = "https://coreradio.online"
+            target = url_input.strip() if url_input else base_url
+            if not target.startswith("http"): target = "https://" + target
+            urls = [target] if "page" not in target and len(target) > 30 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
+        else:
+            base_url = "https://deathgrind.club"
+            target = url_input.strip() if url_input else base_url
+            if not target.startswith("http"): target = "https://" + target
+            urls = [target] if "page" not in target and len(target) > 30 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
         
-        processed_links = set()
+        processed_names = set() # Checken op naam ipv link om dubbelen te voorkomen
         temp_results = []
         
         with tab1:
@@ -197,28 +227,47 @@ if submitted or st.session_state['found_items']:
         current_row_cols = None
 
         for i, u in enumerate(urls):
-            status_text.write(f"🕵️ Scannen van pagina {i+1}...")
+            status_text.write(f"🕵️ Scannen van {source_site} (Pagina {i+1})...")
             try:
                 r = requests.get(u, headers=headers)
                 soup = BeautifulSoup(r.text, 'html.parser')
-                page_links = [a.get('href') for a in soup.find_all('a') if a.get('href') and "coreradio.online" in a.get('href') and re.search(r'/\d+-', a.get('href'))]
                 
-                for link in page_links:
-                    if link in processed_links: continue
-                    processed_links.add(link)
+                items_to_process = []
+
+                # === SCRAPING LOGICA PER SITE ===
+                if source_site == "CoreRadio":
+                    # CoreRadio logica (Links pakken)
+                    for a in soup.find_all('a'):
+                        h = a.get('href')
+                        if h and "coreradio.online" in h and re.search(r'/\d+-', h):
+                            name = clean_coreradio_name(h)
+                            items_to_process.append({"name": name, "orig_link": h})
+                
+                elif source_site == "DeathGrind.club":
+                    # DeathGrind logica (Titels pakken uit h2/h3 tags)
+                    # Ze gebruiken vaak 'entry-title' of 'post-title'
+                    titles = soup.find_all(class_='entry-title')
+                    for t in titles:
+                        raw_title = t.text.strip()
+                        clean_t = clean_deathgrind_title(raw_title)
+                        items_to_process.append({"name": clean_t, "orig_link": u})
+
+                # === VERWERKING (HETZELFDE VOOR BEIDE) ===
+                for item in items_to_process:
+                    search_term = item['name']
                     
-                    name = clean_name(link) # Dit is "Artiest Album" (rommelig)
+                    if search_term in processed_names: continue
+                    processed_names.add(search_term)
                     
-                    # Hier gebeurt de magie: we krijgen nu ook de SCHONE artiest terug!
-                    img_url, src, clean_artist = get_best_artwork_and_artist(name)
+                    # Zoek de cover in de "Sink" (Zoekmachines)
+                    img_url, src, clean_artist = get_best_artwork_and_artist(search_term)
                     
                     if img_url:
                         try:
                             img_data = requests.get(img_url, timeout=3).content
-                            # Sla de schone artiest op voor straks!
                             item_data = {
-                                "name": name, 
-                                "clean_artist": clean_artist if clean_artist else name, # Fallback naar zoekterm als niks gevonden
+                                "name": search_term, 
+                                "clean_artist": clean_artist if clean_artist else search_term, 
                                 "image_url": img_url, 
                                 "image_data": img_data, 
                                 "source": src
@@ -230,10 +279,16 @@ if submitted or st.session_state['found_items']:
                                     current_row_cols = st.columns(cols_per_row)
                                 with current_row_cols[current_col_idx % cols_per_row]:
                                     st.image(img_url, use_container_width=True)
-                                    st.caption(f"**{name}**\n*{src}*")
+                                    st.caption(f"**{search_term}**\n*{src}*")
                                 current_col_idx += 1
                         except: pass
-            except: pass
+                    else:
+                        # Optioneel: Als je op DeathGrind zoekt, kan je hier nog proberen
+                        # de thumbnail van de site zelf te pakken als fallback.
+                        pass
+
+            except Exception as e:
+                print(e)
             bar.progress((i + 1) / len(urls))
         
         st.session_state['found_items'] = temp_results
@@ -267,20 +322,20 @@ if submitted or st.session_state['found_items']:
         
         with tab2:
             if not api_key_input:
-                st.warning("⚠️ Vul je Last.fm API Key in de zijbalk in om suggesties te zien.")
+                st.warning("⚠️ Vul je Last.fm API Key in om suggesties te zien.")
             else:
-                st.subheader("🔥 Recommendations (op basis van gevonden artiesten)")
-                
-                # We pakken alleen items waar we een 'clean_artist' van hebben
-                seeds = [x for x in valid_items if x.get('clean_artist')][:5]
-                
-                if not seeds:
-                    st.info("Geen duidelijke artiesten gevonden om recommendations op te baseren.")
+                st.subheader("🔥 Recommendations")
+                seeds = []
+                seen = set()
+                for x in valid_items:
+                    if x['clean_artist'] not in seen:
+                        seeds.append(x)
+                        seen.add(x['clean_artist'])
+                        if len(seeds) >= 5: break
                 
                 for seed in seeds:
                     artist_name = seed['clean_artist']
                     recs = get_similar_artists(artist_name, api_key_input)
-                    
                     if recs:
                         st.markdown(f"### Omdat je houdt van: *{artist_name}*")
                         rec_cols = st.columns(4)
