@@ -20,22 +20,22 @@ spotify_css = """
     div.stButton > button:hover { background-color: #1ed760; color: white; transform: scale(1.05); }
     .stTextInput > div > div > input { background-color: #282828; color: white; border-radius: 20px; border: 1px solid #333; }
     h1, h2, h3 { color: white !important; font-family: 'Circular', sans-serif; }
-    /* Link styling */
     a { color: #1DB954 !important; text-decoration: none; }
     a:hover { text-decoration: underline; }
-    /* Radio buttons */
     .stRadio > div { color: white; }
 </style>
 """
 st.markdown(spotify_css, unsafe_allow_html=True)
 
 # --- 2. API KEYS & INSTELLINGEN ---
-headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+}
 
 # --- 3. HELPER FUNCTIES ---
 
 def clean_coreradio_name(url_part):
-    """Maakt CoreRadio URL's schoon naar een titel"""
     name = url_part.split('/')[-1].replace('.html', '')
     name = re.sub(r'^\d+-', '', name).replace('-', ' ')
     trash = ['deluxe edition', 'remastered', '2024', '2025', '2026', 'web', 'flac', '320', 'kbps', 'ep', 'single', 'full album']
@@ -43,19 +43,17 @@ def clean_coreradio_name(url_part):
     return re.sub(' +', ' ', name).strip()
 
 def clean_deathgrind_title(title):
-    """Maakt DeathGrind titels schoon (verwijdert jaartallen en haakjes)"""
-    # DeathGrind formaat is vaak: "Band – Album (Year) [Format]"
-    # Stap 1: Verwijder alles tussen () en []
-    clean = re.sub(r'\(.*?\)', '', title)
-    clean = re.sub(r'\[.*?\]', '', clean)
-    # Stap 2: Vervang rare streepjes
+    # Verwijder alles tussen [] en ()
+    clean = re.sub(r'\[.*?\]', '', title)
+    clean = re.sub(r'\(.*?\)', '', clean)
+    # Verwijder specifieke woorden
+    trash = ['mp3', 'flac', '320kbps', 'rar', 'zip', 'download']
+    for t in trash: clean = re.sub(fr'\b{t}\b', '', clean, flags=re.IGNORECASE)
+    # Vervang streepjes
     clean = clean.replace('–', '-').replace('—', '-')
-    # Stap 3: Verwijder jaartallen en extenties
-    clean = re.sub(r'\b\d{4}\b', '', clean)
-    clean = clean.replace('mp3', '').replace('flac', '').replace('rar', '')
     return re.sub(' +', ' ', clean).strip()
 
-# --- ZOEKMACHINES (De plekken waar we de Art zoeken) ---
+# --- ZOEKMACHINES ---
 
 def search_itunes(term):
     try:
@@ -125,31 +123,25 @@ def search_musicbrainz(term):
     except: pass
     return None, None, None
 
-# --- DE MASTER ZOEKFUNCTIE ---
 def get_best_artwork_and_artist(term):
-    # 1. iTunes (Vaak beste kwaliteit)
     img, src, artist = search_itunes(term)
     if img: return img, src, artist
     
-    # 2. Bandcamp (Top voor metal/underground)
-    img, src, artist = search_bandcamp(term)
+    img, src = search_bandcamp(term)
     if img: return img, src, artist
     
-    # 3. Amazon (Hoge res)
-    img, src, artist = search_amazon(term)
+    img, src = search_amazon(term)
     if img: return img, src, None 
     
-    # 4. Deezer (Betrouwbaar)
-    img, src, artist = search_deezer(term)
+    img, src = search_deezer(term)
     if img: return img, src, artist
     
-    # 5. MusicBrainz (Backup)
-    img, src, artist = search_musicbrainz(term)
+    img, src = search_musicbrainz(term)
     if img: return img, src, artist
 
     return None, None, None
 
-# --- 4. RECOMMENDATION ENGINE (LAST.FM) ---
+# --- RECOMMENDATIONS ---
 def get_similar_artists(artist_name, api_key):
     if not api_key or not artist_name: return []
     try:
@@ -166,7 +158,7 @@ def get_similar_artists(artist_name, api_key):
         return recs
     except: return []
 
-# --- 5. UI LOGICA ---
+# --- UI LOGICA ---
 
 if 'found_items' not in st.session_state:
     st.session_state['found_items'] = []
@@ -176,16 +168,13 @@ with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/2048px-Spotify_logo_without_text.svg.png", width=50)
     st.title("Cover Hunter")
     
-    # Bron Selectie
     st.subheader("Selecteer Bron:")
     source_site = st.radio("Waar wil je zoeken?", ["CoreRadio", "DeathGrind.club"])
-
     api_key_input = st.text_input("Last.fm API Key", type="password")
     
     with st.form("search_form"):
-        # Placeholder verandert op basis van selectie
         ph = "coreradio.online" if source_site == "CoreRadio" else "deathgrind.club"
-        url_input = st.text_input(f"{source_site} URL (Optioneel)", placeholder=ph)
+        url_input = st.text_input(f"{source_site} URL", placeholder=ph)
         pages = st.slider("Aantal pagina's", 1, 5, 1)
         submitted = st.form_submit_button("Start Search")
 
@@ -194,7 +183,6 @@ with st.sidebar:
 if not submitted and not st.session_state['found_items']:
     st.markdown("### 👋 Welkom bij Cover Hunter")
     st.write(f"Je zoekt nu op: **{source_site}**.")
-    st.write("De app pakt de albumtitels van deze site en zoekt automatisch de beste kwaliteit covers op iTunes, Bandcamp en Amazon.")
 
 if submitted or st.session_state['found_items']:
     tab1, tab2 = st.tabs(["🎵 Gevonden Albums", "🔥 Recommendations"])
@@ -204,7 +192,7 @@ if submitted or st.session_state['found_items']:
         status_text = st.empty()
         bar = st.progress(0)
         
-        # URL Logic op basis van bron
+        # URL Logic
         if source_site == "CoreRadio":
             base_url = "https://coreradio.online"
             target = url_input.strip() if url_input else base_url
@@ -216,7 +204,7 @@ if submitted or st.session_state['found_items']:
             if not target.startswith("http"): target = "https://" + target
             urls = [target] if "page" not in target and len(target) > 30 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
         
-        processed_names = set() # Checken op naam ipv link om dubbelen te voorkomen
+        processed_names = set()
         temp_results = []
         
         with tab1:
@@ -226,40 +214,53 @@ if submitted or st.session_state['found_items']:
         current_col_idx = 0
         current_row_cols = None
 
+        total_items_found = 0
+
         for i, u in enumerate(urls):
             status_text.write(f"🕵️ Scannen van {source_site} (Pagina {i+1})...")
             try:
-                r = requests.get(u, headers=headers)
-                soup = BeautifulSoup(r.text, 'html.parser')
+                r = requests.get(u, headers=headers, timeout=10)
                 
+                if r.status_code != 200:
+                    st.error(f"Fout bij laden pagina: {r.status_code}")
+                    continue
+
+                soup = BeautifulSoup(r.text, 'html.parser')
                 items_to_process = []
 
-                # === SCRAPING LOGICA PER SITE ===
+                # === SCRAPING LOGICA ===
                 if source_site == "CoreRadio":
-                    # CoreRadio logica (Links pakken)
                     for a in soup.find_all('a'):
                         h = a.get('href')
                         if h and "coreradio.online" in h and re.search(r'/\d+-', h):
                             name = clean_coreradio_name(h)
-                            items_to_process.append({"name": name, "orig_link": h})
+                            items_to_process.append({"name": name})
                 
                 elif source_site == "DeathGrind.club":
-                    # DeathGrind logica (Titels pakken uit h2/h3 tags)
-                    # Ze gebruiken vaak 'entry-title' of 'post-title'
-                    titles = soup.find_all(class_='entry-title')
-                    for t in titles:
-                        raw_title = t.text.strip()
-                        clean_t = clean_deathgrind_title(raw_title)
-                        items_to_process.append({"name": clean_t, "orig_link": u})
+                    # UPDATE: Zoek breder naar H2 en H3 tags, want entry-title werkt soms niet
+                    headings = soup.find_all(['h2', 'h3'])
+                    for h in headings:
+                        # Vaak zit de titel in een <a> tag in de heading
+                        link = h.find('a')
+                        if link:
+                            raw_title = link.text.strip()
+                        else:
+                            raw_title = h.text.strip()
+                        
+                        if raw_title and len(raw_title) > 5: # Filter lege titels
+                            clean_t = clean_deathgrind_title(raw_title)
+                            items_to_process.append({"name": clean_t})
 
-                # === VERWERKING (HETZELFDE VOOR BEIDE) ===
+                # === VERWERKING ===
+                if not items_to_process:
+                    st.warning(f"Geen titels gevonden op pagina {i+1}. De sitestructuur is misschien anders of geblokkeerd.")
+                
                 for item in items_to_process:
                     search_term = item['name']
-                    
                     if search_term in processed_names: continue
                     processed_names.add(search_term)
+                    total_items_found += 1
                     
-                    # Zoek de cover in de "Sink" (Zoekmachines)
                     img_url, src, clean_artist = get_best_artwork_and_artist(search_term)
                     
                     if img_url:
@@ -282,19 +283,19 @@ if submitted or st.session_state['found_items']:
                                     st.caption(f"**{search_term}**\n*{src}*")
                                 current_col_idx += 1
                         except: pass
-                    else:
-                        # Optioneel: Als je op DeathGrind zoekt, kan je hier nog proberen
-                        # de thumbnail van de site zelf te pakken als fallback.
-                        pass
-
             except Exception as e:
-                print(e)
+                st.error(f"Verbindingsfout: {e}")
+
             bar.progress((i + 1) / len(urls))
         
         st.session_state['found_items'] = temp_results
         status_text.empty()
         bar.empty()
-        st.rerun()
+        
+        if total_items_found == 0:
+            st.error("⚠️ De scraper kon helemaal geen albums vinden. Mogelijk blokkeert de site onze toegang (Cloudflare/Bot protectie).")
+        else:
+            st.rerun()
 
     else:
         valid_items = st.session_state['found_items']
