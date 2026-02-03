@@ -43,13 +43,10 @@ def clean_coreradio_name(url_part):
     return re.sub(' +', ' ', name).strip()
 
 def clean_deathgrind_title(title):
-    # Verwijder alles tussen [] en ()
     clean = re.sub(r'\[.*?\]', '', title)
     clean = re.sub(r'\(.*?\)', '', clean)
-    # Verwijder specifieke woorden
     trash = ['mp3', 'flac', '320kbps', 'rar', 'zip', 'download']
     for t in trash: clean = re.sub(fr'\b{t}\b', '', clean, flags=re.IGNORECASE)
-    # Vervang streepjes
     clean = clean.replace('–', '-').replace('—', '-')
     return re.sub(' +', ' ', clean).strip()
 
@@ -141,7 +138,6 @@ def get_best_artwork_and_artist(term):
 
     return None, None, None
 
-# --- RECOMMENDATIONS ---
 def get_similar_artists(artist_name, api_key):
     if not api_key or not artist_name: return []
     try:
@@ -192,17 +188,34 @@ if submitted or st.session_state['found_items']:
         status_text = st.empty()
         bar = st.progress(0)
         
-        # URL Logic
+        # URL Logic - HIER ZAT DE FOUT
         if source_site == "CoreRadio":
             base_url = "https://coreradio.online"
             target = url_input.strip() if url_input else base_url
             if not target.startswith("http"): target = "https://" + target
-            urls = [target] if "page" not in target and len(target) > 30 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
+            # CoreRadio gebruikt wel page/1/ dus dat laten we zo, of passen we aan voor veiligheid:
+            urls = []
+            if "page" not in target and len(target) > 35:
+                urls = [target]
+            else:
+                for i in range(1, pages + 1):
+                     urls.append(base_url if i == 1 else f"{base_url}/page/{i}/")
+
         else:
+            # DeathGrind.club Logic
             base_url = "https://deathgrind.club"
             target = url_input.strip() if url_input else base_url
             if not target.startswith("http"): target = "https://" + target
-            urls = [target] if "page" not in target and len(target) > 30 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
+            
+            # URL fix: Page 1 is gewoon base_url
+            urls = []
+            if "page" not in target and len(target) > 35: # Specifieke post
+                urls = [target]
+            else:
+                for i in range(1, pages + 1):
+                    # HIER IS DE FIX: Als i=1, gebruik base_url, anders /page/i/
+                    link = base_url if i == 1 else f"{base_url}/page/{i}/"
+                    urls.append(link)
         
         processed_names = set()
         temp_results = []
@@ -222,7 +235,7 @@ if submitted or st.session_state['found_items']:
                 r = requests.get(u, headers=headers, timeout=10)
                 
                 if r.status_code != 200:
-                    st.error(f"Fout bij laden pagina: {r.status_code}")
+                    st.error(f"Fout bij laden pagina: {r.status_code} ({u})")
                     continue
 
                 soup = BeautifulSoup(r.text, 'html.parser')
@@ -237,23 +250,21 @@ if submitted or st.session_state['found_items']:
                             items_to_process.append({"name": name})
                 
                 elif source_site == "DeathGrind.club":
-                    # UPDATE: Zoek breder naar H2 en H3 tags, want entry-title werkt soms niet
                     headings = soup.find_all(['h2', 'h3'])
                     for h in headings:
-                        # Vaak zit de titel in een <a> tag in de heading
                         link = h.find('a')
                         if link:
                             raw_title = link.text.strip()
                         else:
                             raw_title = h.text.strip()
                         
-                        if raw_title and len(raw_title) > 5: # Filter lege titels
+                        if raw_title and len(raw_title) > 3:
                             clean_t = clean_deathgrind_title(raw_title)
                             items_to_process.append({"name": clean_t})
 
                 # === VERWERKING ===
                 if not items_to_process:
-                    st.warning(f"Geen titels gevonden op pagina {i+1}. De sitestructuur is misschien anders of geblokkeerd.")
+                    st.warning(f"Geen titels gevonden op pagina {i+1} ({u}).")
                 
                 for item in items_to_process:
                     search_term = item['name']
@@ -293,7 +304,7 @@ if submitted or st.session_state['found_items']:
         bar.empty()
         
         if total_items_found == 0:
-            st.error("⚠️ De scraper kon helemaal geen albums vinden. Mogelijk blokkeert de site onze toegang (Cloudflare/Bot protectie).")
+            st.error("De scraper kon geen albums vinden. Mogelijk blokkeert de site (403/404) of is de structuur veranderd.")
         else:
             st.rerun()
 
