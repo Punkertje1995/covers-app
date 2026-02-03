@@ -47,11 +47,6 @@ spotify_css = """
         color: white !important;
         font-family: 'Circular', sans-serif;
     }
-    /* Expander styling */
-    .streamlit-expanderHeader {
-        background-color: #181818;
-        color: white;
-    }
 </style>
 """
 st.markdown(spotify_css, unsafe_allow_html=True)
@@ -90,6 +85,22 @@ def search_bandcamp(term):
     except: pass
     return None, None
 
+def search_amazon(term):
+    try:
+        # Zoeken in digitale muziek sectie
+        url = f"https://www.amazon.com/s?k={quote(term)}&i=digital-music-album"
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, 'html.parser')
+            img = soup.find('img', class_='s-image')
+            if img and 'src' in img.attrs:
+                src = img['src']
+                # Verwijder resize parameters (._AC_UY218_) voor full res
+                clean_src = re.sub(r'\._AC_.*?\.', '.', src)
+                return clean_src, "Amazon Music (HQ)"
+    except: pass
+    return None, None
+
 def search_deezer(term):
     try:
         r = requests.get("https://api.deezer.com/search", params={"q": term, "limit": 1}, timeout=5)
@@ -98,31 +109,6 @@ def search_deezer(term):
             item = d['data'][0]
             if 'cover_xl' in item: return item['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)"
             if 'album' in item: return item['album']['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)"
-    except: pass
-    return None, None
-
-def search_amazon(term):
-    """Probeert Amazon Digital Music te scrapen voor covers"""
-    try:
-        # Zoek specifiek in de categorie digitale muziek albums
-        url = f"https://www.amazon.com/s?k={quote(term)}&i=digital-music-album"
-        r = requests.get(url, headers=headers, timeout=5)
-        
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, 'html.parser')
-            # Amazon verandert classes vaak, maar s-image is vrij stabiel
-            img = soup.find('img', class_='s-image')
-            
-            if img and 'src' in img.attrs:
-                src = img['src']
-                # Amazon images hebben vaak resize parameters zoals ._AC_UY218_
-                # We halen alles tussen de laatste punt en de extensie weg voor de full-size
-                # Voorbeeld: ...images/I/81abcde._AC_UY218_.jpg -> ...images/I/81abcde.jpg
-                
-                # Regex om de resize parameters te verwijderen
-                clean_src = re.sub(r'\._AC_.*?\.', '.', src)
-                
-                return clean_src, "Amazon Music (High Res)"
     except: pass
     return None, None
 
@@ -142,14 +128,14 @@ def search_musicbrainz(term):
     return None, None
 
 def get_best_artwork(term):
-    # De nieuwe volgorde inclusief Amazon
+    # Volgorde van kwaliteit
     img, src = search_itunes(term)
     if img: return img, src
     
     img, src = search_bandcamp(term)
     if img: return img, src
     
-    img, src = search_amazon(term)  # NIEUW
+    img, src = search_amazon(term) # Amazon toegevoegd
     if img: return img, src
     
     img, src = search_deezer(term)
@@ -160,32 +146,21 @@ def get_best_artwork(term):
     
     return None, None
 
-# --- 4. RECOMMENDATION ENGINE (LAST.FM) ---
+# --- 4. RECOMMENDATION ENGINE ---
 
 def get_similar_artists(artist_name, api_key):
     if not api_key: return []
-    
     try:
         clean_artist = artist_name.split(" - ")[0] if " - " in artist_name else artist_name
         url = "http://ws.audioscrobbler.com/2.0/"
-        params = {
-            "method": "artist.getsimilar",
-            "artist": clean_artist,
-            "api_key": api_key,
-            "format": "json",
-            "limit": 4
-        }
+        params = {"method": "artist.getsimilar", "artist": clean_artist, "api_key": api_key, "format": "json", "limit": 4}
         r = requests.get(url, params=params, timeout=3)
         data = r.json()
-        
         recs = []
         if 'similarartists' in data and 'artist' in data['similarartists']:
             for art in data['similarartists']['artist']:
                 img, _ = get_best_artwork(art['name']) 
-                recs.append({
-                    "name": art['name'],
-                    "image": img if img else "https://via.placeholder.com/300x300.png?text=No+Image"
-                })
+                recs.append({"name": art['name'], "image": img if img else "https://via.placeholder.com/300x300.png?text=No+Image"})
         return recs
     except: return []
 
@@ -193,129 +168,151 @@ def get_similar_artists(artist_name, api_key):
 
 if 'found_items' not in st.session_state:
     st.session_state['found_items'] = []
-if 'scan_done' not in st.session_state:
-    st.session_state['scan_done'] = False
 
 # Sidebar
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/2048px-Spotify_logo_without_text.svg.png", width=50)
     st.title("Cover Hunter")
-    
-    # Input voor Last.fm API Key
-    api_key_input = st.text_input("Last.fm API Key (Optioneel)", type="password", help="Plak hier je key voor recommendations.")
+    api_key_input = st.text_input("Last.fm API Key (Optioneel)", type="password")
     
     with st.form("search_form"):
         url_input = st.text_input("CoreRadio URL", placeholder="coreradio.online")
         pages = st.slider("Pagina's", 1, 5, 1)
         submitted = st.form_submit_button("Start Search")
 
-# Scrape Logica
-if submitted:
-    st.session_state['found_items'] = []
-    status_text = st.empty()
-    bar = st.progress(0)
-    
-    target = url_input.strip() if url_input else "https://coreradio.online"
-    if not target.startswith("http"): target = "https://" + target
-    
-    urls = [target] if "page" not in target and len(target) > 30 else [f"https://coreradio.online/page/{i}/" for i in range(1, pages+1)]
-    
-    processed_links = set()
-    temp_results = []
-    
-    for i, u in enumerate(urls):
-        status_text.write(f"🕵️ Scannen van pagina {i+1}...")
-        try:
-            r = requests.get(u, headers=headers)
-            soup = BeautifulSoup(r.text, 'html.parser')
-            
-            page_links = []
-            for a in soup.find_all('a'):
-                h = a.get('href')
-                if h and "coreradio.online" in h and re.search(r'/\d+-', h):
-                    page_links.append(h)
-            
-            for link in page_links:
-                if link in processed_links: continue
-                processed_links.add(link)
-                
-                name = clean_name(link)
-                img_url, src = get_best_artwork(name)
-                
-                if img_url:
-                    try:
-                        img_data = requests.get(img_url, timeout=3).content
-                        temp_results.append({
-                            "name": name,
-                            "image_url": img_url,
-                            "image_data": img_data,
-                            "source": src
-                        })
-                    except: pass
-                else:
-                    temp_results.append({
-                        "name": name,
-                        "image_url": None,
-                        "image_data": None,
-                        "source": "Niet gevonden"
-                    })
-        except: pass
-        bar.progress((i + 1) / len(urls))
-    
-    st.session_state['found_items'] = temp_results
-    st.session_state['scan_done'] = True
-    status_text.empty()
-    bar.empty()
+# --- HET HOOFDSCHERM ---
 
-# --- 6. HET HOOFDSCHERM (TABS) ---
+# Als er nog niet gezocht is, toon welkom
+if not submitted and not st.session_state['found_items']:
+    st.markdown("### 👋 Welkom bij Cover Hunter")
+    st.write("Druk op start om covers live te zien verschijnen.")
 
-if st.session_state['scan_done']:
-    valid_items = [x for x in st.session_state['found_items'] if x['image_url']]
+# Als we gaan zoeken OF als er al resultaten zijn
+if submitted or st.session_state['found_items']:
     
-    if valid_items:
-        zip_buf = BytesIO()
-        with zipfile.ZipFile(zip_buf, "w") as zf:
-            for item in valid_items:
-                zf.writestr(f"{item['name']}.jpg", item['image_data'])
-        
-        st.download_button("📥 DOWNLOAD ALLES (ZIP)", data=zip_buf.getvalue(), file_name="covers.zip", mime="application/zip", type="primary")
-
+    # Maak de tabs ALVAST aan (zodat we erin kunnen schrijven tijdens het zoeken)
     tab1, tab2 = st.tabs(["🎵 Gevonden Albums", "🔥 Recommendations"])
 
-    with tab1:
-        st.subheader(f"Gevonden: {len(valid_items)} albums")
-        cols_per_row = 4
-        rows = math.ceil(len(valid_items) / cols_per_row)
+    # === LOGICA TIJDENS HET ZOEKEN (LIVE WEERGAVE) ===
+    if submitted:
+        st.session_state['found_items'] = [] # Reset vorige resultaten
+        status_text = st.empty()
+        bar = st.progress(0)
         
-        for i in range(rows):
-            cols = st.columns(cols_per_row)
-            for j in range(cols_per_row):
-                idx = i * cols_per_row + j
-                if idx < len(valid_items):
-                    item = valid_items[idx]
-                    with cols[j]:
-                        st.image(item['image_url'], use_container_width=True)
-                        st.caption(f"**{item['name']}**\n\n*{item['source']}*")
-    
-    with tab2:
-        st.subheader("Op basis van je zoekopdracht vind je dit misschien ook tof:")
+        target = url_input.strip() if url_input else "https://coreradio.online"
+        if not target.startswith("http"): target = "https://" + target
+        urls = [target] if "page" not in target and len(target) > 30 else [f"https://coreradio.online/page/{i}/" for i in range(1, pages+1)]
         
-        if not api_key_input:
-            st.warning("⚠️ Vul je Last.fm API Key in de zijbalk in om suggesties te zien.")
-        else:
-            seed_artists = valid_items[:5] 
+        processed_links = set()
+        temp_results = []
+        
+        # We bereiden het grid voor in Tab 1
+        with tab1:
+            st.info("Zoeken gestart... resultaten verschijnen hieronder live!")
+            # We maken een container waarin we steeds nieuwe rijen toevoegen
+            live_grid = st.container()
             
-            for seed in seed_artists:
-                recs = get_similar_artists(seed['name'], api_key_input)
-                if recs:
-                    st.markdown(f"### Omdat je zocht naar: *{seed['name']}*")
-                    rec_cols = st.columns(4)
-                    for k, rec in enumerate(recs):
-                        with rec_cols[k]:
-                            st.image(rec['image'], use_container_width=True)
-                            st.write(f"**{rec['name']}**")
-                    st.markdown("---")
+        # Variabelen voor het live grid
+        cols_per_row = 4
+        current_col_idx = 0
+        current_row_cols = None
 
-else:
-    st.markdown("### 👋 Welkom bij Cover Hunter")
-    st.write("Gebruik het menu links om te beginnen met scannen.")
+        # DE LOOP
+        for i, u in enumerate(urls):
+            status_text.write(f"🕵️ Scannen van pagina {i+1}...")
+            try:
+                r = requests.get(u, headers=headers)
+                soup = BeautifulSoup(r.text, 'html.parser')
+                
+                page_links = []
+                for a in soup.find_all('a'):
+                    h = a.get('href')
+                    if h and "coreradio.online" in h and re.search(r'/\d+-', h):
+                        page_links.append(h)
+                
+                for link in page_links:
+                    if link in processed_links: continue
+                    processed_links.add(link)
+                    
+                    name = clean_name(link)
+                    img_url, src = get_best_artwork(name)
+                    
+                    # Als we iets vinden:
+                    if img_url:
+                        try:
+                            # Download data
+                            img_data = requests.get(img_url, timeout=3).content
+                            item_data = {"name": name, "image_url": img_url, "image_data": img_data, "source": src}
+                            temp_results.append(item_data)
+                            
+                            # === LIVE RENDERING ===
+                            with live_grid:
+                                # Als we aan het begin van een rij zijn (0, 4, 8...), maak nieuwe kolommen
+                                if current_col_idx % cols_per_row == 0:
+                                    current_row_cols = st.columns(cols_per_row)
+                                
+                                # Plaats plaatje in de juiste kolom
+                                with current_row_cols[current_col_idx % cols_per_row]:
+                                    st.image(img_url, use_container_width=True)
+                                    st.caption(f"**{name}**\n*{src}*")
+                                
+                                current_col_idx += 1
+                                # ======================
+                                
+                        except: pass
+            except: pass
+            bar.progress((i + 1) / len(urls))
+        
+        # Klaar met zoeken
+        st.session_state['found_items'] = temp_results
+        status_text.empty()
+        bar.empty()
+        st.success(f"Klaar! {len(temp_results)} covers gevonden.")
+        st.rerun() # Herlaad de pagina om alles netjes 'statisch' te tonen
+
+    # === LOGICA NA HET ZOEKEN (STATISCHE WEERGAVE) ===
+    # Dit wordt getoond na de 'st.rerun()' of als je wisselt van tabblad
+    else:
+        valid_items = st.session_state['found_items']
+        
+        # Download knop bovenin
+        if valid_items:
+            zip_buf = BytesIO()
+            with zipfile.ZipFile(zip_buf, "w") as zf:
+                for item in valid_items:
+                    zf.writestr(f"{item['name']}.jpg", item['image_data'])
+            st.download_button("📥 DOWNLOAD ALLES (ZIP)", data=zip_buf.getvalue(), file_name="covers.zip", mime="application/zip", type="primary")
+
+        # TAB 1: Het Grid (opnieuw tekenen vanuit geheugen)
+        with tab1:
+            st.subheader(f"Gevonden: {len(valid_items)} albums")
+            cols_per_row = 4
+            rows = math.ceil(len(valid_items) / cols_per_row)
+            
+            for i in range(rows):
+                cols = st.columns(cols_per_row)
+                for j in range(cols_per_row):
+                    idx = i * cols_per_row + j
+                    if idx < len(valid_items):
+                        item = valid_items[idx]
+                        with cols[j]:
+                            st.image(item['image_url'], use_container_width=True)
+                            st.caption(f"**{item['name']}**\n\n*{item['source']}*")
+        
+        # TAB 2: Recommendations
+        with tab2:
+            st.subheader("Op basis van je zoekopdracht vind je dit misschien ook tof:")
+            if not api_key_input:
+                st.warning("⚠️ Vul je Last.fm API Key in de zijbalk in om suggesties te zien.")
+            else:
+                seed_artists = valid_items[:5] 
+                for seed in seed_artists:
+                    recs = get_similar_artists(seed['name'], api_key_input)
+                    if recs:
+                        st.markdown(f"### Omdat je zocht naar: *{seed['name']}*")
+                        rec_cols = st.columns(4)
+                        for k, rec in enumerate(recs):
+                            with rec_cols[k]:
+                                st.image(rec['image'], use_container_width=True)
+                                st.write(f"**{rec['name']}**")
+                        st.markdown("---")
