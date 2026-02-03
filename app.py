@@ -1,12 +1,12 @@
 import streamlit as st
-import cloudscraper
+import requests
 from bs4 import BeautifulSoup
 from io import BytesIO
 import re
 from urllib.parse import quote
 import zipfile
 import math
-import requests
+import cloudscraper
 
 # --- 1. CONFIGURATIE & CSS ---
 st.set_page_config(page_title="Cover Hunter Pro", page_icon="🟢", layout="wide")
@@ -24,87 +24,94 @@ spotify_css = """
     a { color: #1DB954 !important; text-decoration: none; }
     a:hover { text-decoration: underline; }
     .stRadio > div { color: white; }
+    /* Groene voortgangsbalk */
     .stProgress > div > div > div > div { background-color: #1DB954; }
+    /* Meldingen styling */
+    .stAlert { background-color: #282828; color: white; border: 1px solid #444; }
 </style>
 """
 st.markdown(spotify_css, unsafe_allow_html=True)
 
-# --- 2. SCRAPER INSTELLINGEN (Cloudscraper) ---
-# We maken een scraper aan die Cloudflare probeert te omzeilen
+# --- 2. INSTELLINGEN ---
+# We gebruiken cloudscraper voor de images en requests voor de feed
 scraper = cloudscraper.create_scraper(browser='chrome')
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
-# --- 3. HELPER FUNCTIES ---
+# --- 3. HELPER FUNCTIES (TITELS SCHOONMAKEN) ---
 
-def clean_title_from_link(url):
-    """Haalt een leesbare titel uit de URL (werkt voor zowel CoreRadio als DeathGrind)"""
-    # URL format is vaak: domein.com/12345-band-album-naam.html
-    # Stap 1: Pak het laatste deel
-    slug = url.split('/')[-1].replace('.html', '')
-    # Stap 2: Verwijder de ID aan het begin (cijfers + streepje)
-    slug = re.sub(r'^\d+-', '', slug)
-    # Stap 3: Vervang streepjes door spaties
-    title = slug.replace('-', ' ')
+def clean_title_general(title):
+    """Universele schoonmaker voor titels"""
+    # Verwijder alles tussen [] en ()
+    clean = re.sub(r'\[.*?\]', '', title)
+    clean = re.sub(r'\(.*?\)', '', clean)
     
-    # Stap 4: Schoonmaak (woorden die we niet willen in de zoekopdracht)
-    trash = ['deluxe edition', 'remastered', '2024', '2025', '2026', 'web', 'flac', '320', 'kbps', 'ep', 'single', 'full album', 'mp3', 'rar', 'zip', 'download']
-    for t in trash: title = re.sub(fr'\b{t}\b', '', title, flags=re.IGNORECASE)
+    # Verwijder specifieke onzin woorden
+    trash = ['mp3', 'flac', '320kbps', 'rar', 'zip', 'download', 'full album', 'web', '24bit', 'hi-res']
+    for t in trash: clean = re.sub(fr'\b{t}\b', '', clean, flags=re.IGNORECASE)
     
-    return re.sub(' +', ' ', title).strip()
+    # Verwijder jaartallen (bijv 2023, 2024)
+    clean = re.sub(r'\b20\d{2}\b', '', clean)
+    
+    # Vervang rare streepjes en dubbele spaties
+    clean = clean.replace('–', '-').replace('—', '-').replace('_', ' ')
+    return re.sub(' +', ' ', clean).strip()
 
-# --- ZOEKMACHINES ---
+def clean_coreradio_link(url_part):
+    # CoreRadio specifiek: haal info uit de URL
+    slug = url_part.split('/')[-1].replace('.html', '')
+    slug = re.sub(r'^\d+-', '', slug) # ID weg
+    return slug.replace('-', ' ')
+
+# --- 4. ZOEKMACHINES (SOURCE) ---
 
 def search_itunes(term):
     try:
+        # iTunes is streng, soms helpt het om de requests library te gebruiken
         r = requests.get("https://itunes.apple.com/search", params={"term": term, "media": "music", "entity": "album", "limit": 1}, timeout=5)
         d = r.json()
         if d['resultCount'] > 0:
             item = d['results'][0]
             img = item['artworkUrl100'].replace('100x100bb', '10000x10000bb')
-            artist = item['artistName']
-            return img, "iTunes (4K)", artist
+            return img, "iTunes (4K)", item['artistName']
     except: pass
     return None, None, None
 
 def search_bandcamp(term):
     try:
-        # Bandcamp search werkt prima met gewone requests
+        # Bandcamp zoekpagina scrapen
         search_url = f"https://bandcamp.com/search?q={quote(term)}&item_type=a"
-        r = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        r = requests.get(search_url, headers=headers, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
         result = soup.find('li', class_='searchresult')
         if result:
             img_div = result.find('div', class_='art')
             if img_div and img_div.find('img'):
-                src = img_div.find('img')['src'].replace('_7.jpg', '_0.jpg')
-                artist_div = result.find('div', class_='subhead')
-                artist = artist_div.text.strip().replace('by ', '') if artist_div else None
-                return src, "Bandcamp (Original)", artist
+                src = img_div.find('img')['src'].replace('_7.jpg', '_0.jpg') # _0 is full size
+                
+                # Artiest proberen te vinden
+                artist = None
+                subhead = result.find('div', class_='subhead')
+                if subhead:
+                    artist = subhead.text.strip().replace('by ', '')
+                
+                return src, "Bandcamp (Org)", artist
     except: pass
     return None, None, None
 
 def search_amazon(term):
     try:
+        # Amazon via cloudscraper
         url = f"https://www.amazon.com/s?k={quote(term)}&i=digital-music-album"
-        # Amazon heeft headers nodig, cloudscraper is hier ook handig voor
         r = scraper.get(url)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, 'html.parser')
             img = soup.find('img', class_='s-image')
             if img and 'src' in img.attrs:
+                # Verwijder resize parameters
                 src = re.sub(r'\._AC_.*?\.', '.', img['src'])
-                return src, "Amazon Music (HQ)", None
-    except: pass
-    return None, None, None
-
-def search_deezer(term):
-    try:
-        r = requests.get("https://api.deezer.com/search", params={"q": term, "limit": 1}, timeout=5)
-        d = r.json()
-        if 'data' in d and len(d['data']) > 0:
-            item = d['data'][0]
-            artist = item['artist']['name']
-            if 'cover_xl' in item: return item['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)", artist
-            if 'album' in item: return item['album']['cover_xl'].replace('1000x1000','1400x1400'), "Deezer (HQ)", artist
+                return src, "Amazon (HQ)", None
     except: pass
     return None, None, None
 
@@ -118,29 +125,32 @@ def search_musicbrainz(term):
             release = d['releases'][0]
             artist = release['artist-credit'][0]['name'] if 'artist-credit' in release else None
             cover_url = f"https://coverartarchive.org/release/{release['id']}/front"
+            # Check of plaatje bestaat (head request)
             if requests.head(cover_url).status_code in [200, 302, 307]:
-                 return cover_url, "MusicBrainz (Archive)", artist
+                 return cover_url, "MusicBrainz", artist
     except: pass
     return None, None, None
 
 def get_best_artwork_and_artist(term):
+    # 1. iTunes (Vaak beste kwaliteit)
     img, src, artist = search_itunes(term)
     if img: return img, src, artist
     
-    img, src = search_bandcamp(term)
+    # 2. Bandcamp (Geweldig voor metal/underground)
+    img, src, artist = search_bandcamp(term)
     if img: return img, src, artist
     
-    img, src = search_amazon(term)
+    # 3. Amazon (Hoge res backup)
+    img, src, artist = search_amazon(term)
     if img: return img, src, None 
     
-    img, src = search_deezer(term)
-    if img: return img, src, artist
-    
-    img, src = search_musicbrainz(term)
+    # 4. MusicBrainz (Laatste redmiddel)
+    img, src, artist = search_musicbrainz(term)
     if img: return img, src, artist
 
     return None, None, None
 
+# --- 5. RECOMMENDATIONS ---
 def get_similar_artists(artist_name, api_key):
     if not api_key or not artist_name: return []
     try:
@@ -157,7 +167,7 @@ def get_similar_artists(artist_name, api_key):
         return recs
     except: return []
 
-# --- UI LOGICA ---
+# --- 6. UI LOGICA ---
 
 if 'found_items' not in st.session_state:
     st.session_state['found_items'] = []
@@ -173,7 +183,7 @@ with st.sidebar:
     
     with st.form("search_form"):
         ph = "coreradio.online" if source_site == "CoreRadio" else "deathgrind.club"
-        url_input = st.text_input(f"{source_site} URL", placeholder=ph)
+        url_input = st.text_input(f"Zoek URL (Optioneel)", placeholder=ph)
         pages = st.slider("Aantal pagina's", 1, 5, 1)
         submitted = st.form_submit_button("Start Search")
 
@@ -182,6 +192,7 @@ with st.sidebar:
 if not submitted and not st.session_state['found_items']:
     st.markdown("### 👋 Welkom bij Cover Hunter")
     st.write(f"Je zoekt nu op: **{source_site}**.")
+    st.info("Tip: DeathGrind.club wordt gescand via de RSS feed om blokkades te voorkomen.")
 
 if submitted or st.session_state['found_items']:
     tab1, tab2 = st.tabs(["🎵 Gevonden Albums", "🔥 Recommendations"])
@@ -191,18 +202,23 @@ if submitted or st.session_state['found_items']:
         status_text = st.empty()
         bar = st.progress(0)
         
-        # URL Logic
+        # --- URL GENERATIE ---
+        urls = []
         if source_site == "CoreRadio":
             base_url = "https://coreradio.online"
             target = url_input.strip() if url_input else base_url
-            if not target.startswith("http"): target = "https://" + target
-            urls = [target] if "page" not in target and len(target) > 35 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
-        else:
-            base_url = "https://deathgrind.club"
-            target = url_input.strip() if url_input else base_url
-            if not target.startswith("http"): target = "https://" + target
-            urls = [target] if "page" not in target and len(target) > 35 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
+            if "page" not in target and len(target) > 35: # Directe link
+                urls = [target]
+            else:
+                for i in range(1, pages + 1):
+                    urls.append(base_url if i == 1 else f"{base_url}/page/{i}/")
         
+        elif source_site == "DeathGrind.club":
+            # TRUC: Gebruik de RSS Feed! (?paged=1, ?paged=2)
+            base_feed = "https://deathgrind.club/feed"
+            for i in range(1, pages + 1):
+                urls.append(f"{base_feed}/?paged={i}")
+
         processed_names = set()
         temp_results = []
         
@@ -214,68 +230,75 @@ if submitted or st.session_state['found_items']:
         current_row_cols = None
         total_found = 0
 
+        # --- DE HOOFD LOOP ---
         for i, u in enumerate(urls):
-            status_text.write(f"🕵️ Scannen van {source_site} (Pagina {i+1})...")
+            status_text.write(f"🕵️ Analyseren van bron... (Pagina {i+1})")
+            
+            items_to_process = []
+            
             try:
-                # GEBRUIK HIER DE CLOUDSCRAPER
-                r = scraper.get(u)
+                # CoreRadio is HTML, DeathGrind is XML (RSS)
+                if source_site == "CoreRadio":
+                    r = requests.get(u, headers=headers, timeout=10)
+                    if r.status_code == 200:
+                        soup = BeautifulSoup(r.text, 'html.parser')
+                        for a in soup.find_all('a'):
+                            h = a.get('href')
+                            if h and "coreradio.online" in h and re.search(r'/\d+-', h):
+                                name = clean_coreradio_link(h)
+                                items_to_process.append(clean_title_general(name))
                 
-                if r.status_code != 200:
-                    # Als 404, probeer zonder /page/X/ als het pagina 1 is
-                    st.warning(f"Pagina {i+1} niet bereikbaar ({r.status_code}).")
-                    continue
+                elif source_site == "DeathGrind.club":
+                    # RSS FEED PARSEN (Veel stabieler!)
+                    r = requests.get(u, headers=headers, timeout=15)
+                    if r.status_code == 200:
+                        # XML parsing met BeautifulSoup
+                        soup = BeautifulSoup(r.content, 'xml') # 'xml' parser gebruiken
+                        items = soup.find_all('item')
+                        for item in items:
+                            title = item.find('title').text
+                            items_to_process.append(clean_title_general(title))
+                    else:
+                        st.warning(f"Kon RSS feed niet lezen: {r.status_code}")
 
-                soup = BeautifulSoup(r.text, 'html.parser')
-                page_links = []
+            except Exception as e:
+                print(f"Error scraping {u}: {e}")
 
-                # UNIVERSELE LINK ZOEKER
-                # We zoeken naar ELKE link die lijkt op een album (bevat getallen en .html)
-                # Dit werkt voor CoreRadio, DeathGrind en vele anderen.
-                all_links = soup.find_all('a')
-                for a in all_links:
-                    h = a.get('href')
-                    if h and ".html" in h and re.search(r'/\d+-', h):
-                        # Extra check: moet wel van de juiste site zijn (of relatief)
-                        if source_site == "CoreRadio" and "coreradio.online" in h:
-                            page_links.append(h)
-                        elif source_site == "DeathGrind.club" and ("deathgrind.club" in h or h.startswith("/")):
-                            # Soms zijn links relatief
-                            if h.startswith("/"): h = base_url + h
-                            page_links.append(h)
-
-                for link in page_links:
-                    name = clean_title_from_link(link)
-                    
-                    if name in processed_names: continue
-                    processed_names.add(name)
-                    total_found += 1
-                    
-                    img_url, src, clean_artist = get_best_artwork_and_artist(name)
-                    
-                    if img_url:
-                        try:
-                            # Gebruik requests voor image download (sneller dan cloudscraper voor simpele jpg)
-                            img_data = requests.get(img_url, timeout=3).content
+            # --- ITEMS VERWERKEN ---
+            for search_term in items_to_process:
+                if len(search_term) < 3: continue # Skip lege onzin
+                if search_term in processed_names: continue
+                processed_names.add(search_term)
+                total_found += 1
+                
+                # Zoek de cover
+                img_url, src, clean_artist = get_best_artwork_and_artist(search_term)
+                
+                if img_url:
+                    try:
+                        # Download plaatje
+                        img_req = requests.get(img_url, timeout=5)
+                        if img_req.status_code == 200:
+                            img_data = img_req.content
                             item_data = {
-                                "name": name, 
-                                "clean_artist": clean_artist if clean_artist else name, 
+                                "name": search_term, 
+                                "clean_artist": clean_artist if clean_artist else search_term, 
                                 "image_url": img_url, 
                                 "image_data": img_data, 
                                 "source": src
                             }
                             temp_results.append(item_data)
                             
+                            # Live renderen
                             with live_grid:
                                 if current_col_idx % cols_per_row == 0:
                                     current_row_cols = st.columns(cols_per_row)
                                 with current_row_cols[current_col_idx % cols_per_row]:
                                     st.image(img_url, use_container_width=True)
-                                    st.caption(f"**{name}**\n*{src}*")
+                                    st.caption(f"**{search_term}**\n*{src}*")
                                 current_col_idx += 1
-                        except: pass
-            except Exception as e:
-                st.error(f"Fout: {e}")
-
+                    except: pass
+            
             bar.progress((i + 1) / len(urls))
         
         st.session_state['found_items'] = temp_results
@@ -283,18 +306,21 @@ if submitted or st.session_state['found_items']:
         bar.empty()
         
         if total_found == 0:
-             st.error("Geen albums gevonden. De site blokkeert ons waarschijnlijk of de structuur is anders.")
+             st.error(f"Geen albums gevonden op {source_site}. De bron is mogelijk offline of blokkeert ons volledig.")
         else:
              st.rerun()
 
     else:
+        # --- STATISCHE WEERGAVE NA ZOEKEN ---
         valid_items = st.session_state['found_items']
         
         if valid_items:
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, "w") as zf:
                 for item in valid_items:
-                    zf.writestr(f"{item['name']}.jpg", item['image_data'])
+                    # Bestandsnaam veilig maken
+                    safe_name = re.sub(r'[\\/*?:"<>|]', "", item['name'])
+                    zf.writestr(f"{safe_name}.jpg", item['image_data'])
             st.download_button("📥 DOWNLOAD ALLES (ZIP)", data=zip_buf.getvalue(), file_name="covers.zip", mime="application/zip", type="primary")
 
         with tab1:
@@ -318,10 +344,12 @@ if submitted or st.session_state['found_items']:
                 st.subheader("🔥 Recommendations")
                 seeds = []
                 seen = set()
+                # Pak unieke artiesten
                 for x in valid_items:
-                    if x['clean_artist'] not in seen:
+                    art = x.get('clean_artist')
+                    if art and art not in seen:
                         seeds.append(x)
-                        seen.add(x['clean_artist'])
+                        seen.add(art)
                         if len(seeds) >= 5: break
                 
                 for seed in seeds:
