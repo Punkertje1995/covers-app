@@ -4,4 +4,6 @@ beautifulsoup4
 cloudscraper
 Pillow
 selenium
+lxml
+
 
