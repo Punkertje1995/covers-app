@@ -1,11 +1,12 @@
 import streamlit as st
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from io import BytesIO
 import re
 from urllib.parse import quote
 import zipfile
 import math
+import requests
 
 # --- 1. CONFIGURATIE & CSS ---
 st.set_page_config(page_title="Cover Hunter Pro", page_icon="🟢", layout="wide")
@@ -23,32 +24,32 @@ spotify_css = """
     a { color: #1DB954 !important; text-decoration: none; }
     a:hover { text-decoration: underline; }
     .stRadio > div { color: white; }
+    .stProgress > div > div > div > div { background-color: #1DB954; }
 </style>
 """
 st.markdown(spotify_css, unsafe_allow_html=True)
 
-# --- 2. API KEYS & INSTELLINGEN ---
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-}
+# --- 2. SCRAPER INSTELLINGEN (Cloudscraper) ---
+# We maken een scraper aan die Cloudflare probeert te omzeilen
+scraper = cloudscraper.create_scraper(browser='chrome')
 
 # --- 3. HELPER FUNCTIES ---
 
-def clean_coreradio_name(url_part):
-    name = url_part.split('/')[-1].replace('.html', '')
-    name = re.sub(r'^\d+-', '', name).replace('-', ' ')
-    trash = ['deluxe edition', 'remastered', '2024', '2025', '2026', 'web', 'flac', '320', 'kbps', 'ep', 'single', 'full album']
-    for t in trash: name = re.sub(fr'\b{t}\b', '', name, flags=re.IGNORECASE)
-    return re.sub(' +', ' ', name).strip()
-
-def clean_deathgrind_title(title):
-    clean = re.sub(r'\[.*?\]', '', title)
-    clean = re.sub(r'\(.*?\)', '', clean)
-    trash = ['mp3', 'flac', '320kbps', 'rar', 'zip', 'download']
-    for t in trash: clean = re.sub(fr'\b{t}\b', '', clean, flags=re.IGNORECASE)
-    clean = clean.replace('–', '-').replace('—', '-')
-    return re.sub(' +', ' ', clean).strip()
+def clean_title_from_link(url):
+    """Haalt een leesbare titel uit de URL (werkt voor zowel CoreRadio als DeathGrind)"""
+    # URL format is vaak: domein.com/12345-band-album-naam.html
+    # Stap 1: Pak het laatste deel
+    slug = url.split('/')[-1].replace('.html', '')
+    # Stap 2: Verwijder de ID aan het begin (cijfers + streepje)
+    slug = re.sub(r'^\d+-', '', slug)
+    # Stap 3: Vervang streepjes door spaties
+    title = slug.replace('-', ' ')
+    
+    # Stap 4: Schoonmaak (woorden die we niet willen in de zoekopdracht)
+    trash = ['deluxe edition', 'remastered', '2024', '2025', '2026', 'web', 'flac', '320', 'kbps', 'ep', 'single', 'full album', 'mp3', 'rar', 'zip', 'download']
+    for t in trash: title = re.sub(fr'\b{t}\b', '', title, flags=re.IGNORECASE)
+    
+    return re.sub(' +', ' ', title).strip()
 
 # --- ZOEKMACHINES ---
 
@@ -66,8 +67,9 @@ def search_itunes(term):
 
 def search_bandcamp(term):
     try:
+        # Bandcamp search werkt prima met gewone requests
         search_url = f"https://bandcamp.com/search?q={quote(term)}&item_type=a"
-        r = requests.get(search_url, headers=headers, timeout=5)
+        r = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
         result = soup.find('li', class_='searchresult')
         if result:
@@ -83,7 +85,8 @@ def search_bandcamp(term):
 def search_amazon(term):
     try:
         url = f"https://www.amazon.com/s?k={quote(term)}&i=digital-music-album"
-        r = requests.get(url, headers=headers, timeout=5)
+        # Amazon heeft headers nodig, cloudscraper is hier ook handig voor
+        r = scraper.get(url)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, 'html.parser')
             img = soup.find('img', class_='s-image')
@@ -188,34 +191,17 @@ if submitted or st.session_state['found_items']:
         status_text = st.empty()
         bar = st.progress(0)
         
-        # URL Logic - HIER ZAT DE FOUT
+        # URL Logic
         if source_site == "CoreRadio":
             base_url = "https://coreradio.online"
             target = url_input.strip() if url_input else base_url
             if not target.startswith("http"): target = "https://" + target
-            # CoreRadio gebruikt wel page/1/ dus dat laten we zo, of passen we aan voor veiligheid:
-            urls = []
-            if "page" not in target and len(target) > 35:
-                urls = [target]
-            else:
-                for i in range(1, pages + 1):
-                     urls.append(base_url if i == 1 else f"{base_url}/page/{i}/")
-
+            urls = [target] if "page" not in target and len(target) > 35 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
         else:
-            # DeathGrind.club Logic
             base_url = "https://deathgrind.club"
             target = url_input.strip() if url_input else base_url
             if not target.startswith("http"): target = "https://" + target
-            
-            # URL fix: Page 1 is gewoon base_url
-            urls = []
-            if "page" not in target and len(target) > 35: # Specifieke post
-                urls = [target]
-            else:
-                for i in range(1, pages + 1):
-                    # HIER IS DE FIX: Als i=1, gebruik base_url, anders /page/i/
-                    link = base_url if i == 1 else f"{base_url}/page/{i}/"
-                    urls.append(link)
+            urls = [target] if "page" not in target and len(target) > 35 else [f"{base_url}/page/{i}/" for i in range(1, pages+1)]
         
         processed_names = set()
         temp_results = []
@@ -226,60 +212,53 @@ if submitted or st.session_state['found_items']:
         cols_per_row = 4
         current_col_idx = 0
         current_row_cols = None
-
-        total_items_found = 0
+        total_found = 0
 
         for i, u in enumerate(urls):
             status_text.write(f"🕵️ Scannen van {source_site} (Pagina {i+1})...")
             try:
-                r = requests.get(u, headers=headers, timeout=10)
+                # GEBRUIK HIER DE CLOUDSCRAPER
+                r = scraper.get(u)
                 
                 if r.status_code != 200:
-                    st.error(f"Fout bij laden pagina: {r.status_code} ({u})")
+                    # Als 404, probeer zonder /page/X/ als het pagina 1 is
+                    st.warning(f"Pagina {i+1} niet bereikbaar ({r.status_code}).")
                     continue
 
                 soup = BeautifulSoup(r.text, 'html.parser')
-                items_to_process = []
+                page_links = []
 
-                # === SCRAPING LOGICA ===
-                if source_site == "CoreRadio":
-                    for a in soup.find_all('a'):
-                        h = a.get('href')
-                        if h and "coreradio.online" in h and re.search(r'/\d+-', h):
-                            name = clean_coreradio_name(h)
-                            items_to_process.append({"name": name})
-                
-                elif source_site == "DeathGrind.club":
-                    headings = soup.find_all(['h2', 'h3'])
-                    for h in headings:
-                        link = h.find('a')
-                        if link:
-                            raw_title = link.text.strip()
-                        else:
-                            raw_title = h.text.strip()
-                        
-                        if raw_title and len(raw_title) > 3:
-                            clean_t = clean_deathgrind_title(raw_title)
-                            items_to_process.append({"name": clean_t})
+                # UNIVERSELE LINK ZOEKER
+                # We zoeken naar ELKE link die lijkt op een album (bevat getallen en .html)
+                # Dit werkt voor CoreRadio, DeathGrind en vele anderen.
+                all_links = soup.find_all('a')
+                for a in all_links:
+                    h = a.get('href')
+                    if h and ".html" in h and re.search(r'/\d+-', h):
+                        # Extra check: moet wel van de juiste site zijn (of relatief)
+                        if source_site == "CoreRadio" and "coreradio.online" in h:
+                            page_links.append(h)
+                        elif source_site == "DeathGrind.club" and ("deathgrind.club" in h or h.startswith("/")):
+                            # Soms zijn links relatief
+                            if h.startswith("/"): h = base_url + h
+                            page_links.append(h)
 
-                # === VERWERKING ===
-                if not items_to_process:
-                    st.warning(f"Geen titels gevonden op pagina {i+1} ({u}).")
-                
-                for item in items_to_process:
-                    search_term = item['name']
-                    if search_term in processed_names: continue
-                    processed_names.add(search_term)
-                    total_items_found += 1
+                for link in page_links:
+                    name = clean_title_from_link(link)
                     
-                    img_url, src, clean_artist = get_best_artwork_and_artist(search_term)
+                    if name in processed_names: continue
+                    processed_names.add(name)
+                    total_found += 1
+                    
+                    img_url, src, clean_artist = get_best_artwork_and_artist(name)
                     
                     if img_url:
                         try:
+                            # Gebruik requests voor image download (sneller dan cloudscraper voor simpele jpg)
                             img_data = requests.get(img_url, timeout=3).content
                             item_data = {
-                                "name": search_term, 
-                                "clean_artist": clean_artist if clean_artist else search_term, 
+                                "name": name, 
+                                "clean_artist": clean_artist if clean_artist else name, 
                                 "image_url": img_url, 
                                 "image_data": img_data, 
                                 "source": src
@@ -291,11 +270,11 @@ if submitted or st.session_state['found_items']:
                                     current_row_cols = st.columns(cols_per_row)
                                 with current_row_cols[current_col_idx % cols_per_row]:
                                     st.image(img_url, use_container_width=True)
-                                    st.caption(f"**{search_term}**\n*{src}*")
+                                    st.caption(f"**{name}**\n*{src}*")
                                 current_col_idx += 1
                         except: pass
             except Exception as e:
-                st.error(f"Verbindingsfout: {e}")
+                st.error(f"Fout: {e}")
 
             bar.progress((i + 1) / len(urls))
         
@@ -303,10 +282,10 @@ if submitted or st.session_state['found_items']:
         status_text.empty()
         bar.empty()
         
-        if total_items_found == 0:
-            st.error("De scraper kon geen albums vinden. Mogelijk blokkeert de site (403/404) of is de structuur veranderd.")
+        if total_found == 0:
+             st.error("Geen albums gevonden. De site blokkeert ons waarschijnlijk of de structuur is anders.")
         else:
-            st.rerun()
+             st.rerun()
 
     else:
         valid_items = st.session_state['found_items']
