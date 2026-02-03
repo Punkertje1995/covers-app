@@ -13,7 +13,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
-# --- 1. CONFIGURATIE ---
+# --- 1. CONFIGURATIE & CSS ---
 st.set_page_config(page_title="Cover Hunter Pro", page_icon="🟢", layout="wide")
 
 st.markdown("""
@@ -24,10 +24,11 @@ st.markdown("""
     .stTextInput > div > div > input { background-color: #282828; color: white; border-radius: 20px; border: 1px solid #333; }
     h1, h2, h3 { color: white !important; }
     a { color: #1DB954 !important; text-decoration: none; }
+    .stProgress > div > div > div > div { background-color: #1DB954; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. SELENIUM SETUP (Stealth) ---
+# --- 2. SELENIUM STEALTH SETUP ---
 def get_driver():
     options = Options()
     options.add_argument("--headless")
@@ -36,13 +37,11 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     
-    # Truc om detectie te verminderen
+    # CRUCIAAL: Anti-bot detectie
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    
-    # Gebruik een normale User-Agent
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
     return webdriver.Chrome(options=options)
 
@@ -51,8 +50,7 @@ headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0
 # --- 3. HELPER FUNCTIES ---
 
 def clean_title_general(title):
-    # Verwijder rommel
-    trash = ['mp3', 'flac', '320kbps', 'rar', 'zip', 'download', 'full album', 'web']
+    trash = ['mp3', 'flac', '320kbps', 'rar', 'zip', 'download', 'full album', 'web', '24bit', 'hi-res']
     for t in trash: title = re.sub(fr'\b{t}\b', '', title, flags=re.IGNORECASE)
     title = re.sub(r'\b20\d{2}\b', '', title) # Jaartallen weg
     return re.sub(' +', ' ', title).strip()
@@ -146,7 +144,7 @@ if submitted or st.session_state['found_items']:
         status_text = st.empty()
         bar = st.progress(0)
         
-        # URL Bepaling
+        # URL Logic
         urls = []
         if source_site == "CoreRadio":
             base_url = "https://coreradio.online"
@@ -159,7 +157,6 @@ if submitted or st.session_state['found_items']:
         elif source_site == "DeathGrind.club":
             base_url = "https://deathgrind.club"
             target = url_input.strip() if url_input else base_url
-            # Voor DeathGrind gebruiken we de base URL en laten we Selenium scrollen of klikken
             urls = [target]
 
         processed_names = set()
@@ -182,9 +179,9 @@ if submitted or st.session_state['found_items']:
                 status_text.write(f"🕵️ Bezoeken van {source_site}...")
                 try:
                     driver.get(u)
-                    time.sleep(5) # Wacht op initiële laad
+                    time.sleep(5) 
                     
-                    # Scrollen om lazy loading te activeren (Belangrijk voor DG!)
+                    # Scrollen (Belangrijk voor lazy load images!)
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
                     time.sleep(2)
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -194,37 +191,39 @@ if submitted or st.session_state['found_items']:
                     items_to_process = []
 
                     if source_site == "CoreRadio":
-                        for a in soup.find_all('a'):
+                        # Oude CoreRadio Logic
+                        links = soup.find_all('a')
+                        for a in links:
                             h = a.get('href')
                             if h and "coreradio.online" in h and re.search(r'/\d+-', h):
                                 name = clean_coreradio_link(h)
                                 items_to_process.append({"name": name, "artist": None, "fallback_img": None})
                     
                     elif source_site == "DeathGrind.club":
-                        # === NIEUWE LOGICA MET JOUW HTML ===
-                        # We zoeken alle <article> tags, want dat zijn de blokken
+                        # === SPECIFIEKE LOGICA VOOR JOUW HTML ===
+                        # We zoeken naar <article> tags, dat zijn de blokken
                         articles = soup.find_all('article')
                         
                         for art in articles:
                             try:
-                                # 1. TITEL vinden (Link met /posts/)
+                                # 1. TITEL: Zoek link met /posts/
                                 title_link = art.find('a', href=re.compile(r'/posts/\d+'))
                                 title_text = title_link.text.strip() if title_link else None
                                 
-                                # 2. ARTIEST vinden (Link met /bands/)
+                                # 2. ARTIEST: Zoek link met /bands/
                                 artist_link = art.find('a', href=re.compile(r'/bands/\d+'))
                                 artist_text = artist_link.text.strip() if artist_link else None
                                 
-                                # 3. PLAATJE vinden (met cdn.deathgrind)
+                                # 3. COVER: Zoek img met cdn.deathgrind
                                 img_tag = art.find('img', src=re.compile(r'cdn\.deathgrind'))
                                 fallback_src = img_tag['src'] if img_tag else None
                                 
                                 if title_text:
-                                    # Combineren voor zoekterm
-                                    search_query = f"{artist_text} {title_text}" if artist_text else title_text
+                                    # Als artiest gevonden is, combineer. Anders alleen titel.
+                                    full_query = f"{artist_text} {title_text}" if artist_text else title_text
                                     
                                     items_to_process.append({
-                                        "name": clean_title_general(search_query),
+                                        "name": clean_title_general(full_query),
                                         "artist": artist_text,
                                         "fallback_img": fallback_src
                                     })
@@ -237,12 +236,13 @@ if submitted or st.session_state['found_items']:
                         processed_names.add(search_term)
                         total_found += 1
                         
+                        # Zoek cover via API's
                         img_url, src, clean_artist = get_best_artwork_and_artist(search_term)
                         
-                        # Fallback naar site plaatje
+                        # FALLBACK: Als API's falen, pak de DeathGrind cover!
                         if not img_url and item.get('fallback_img'):
                             img_url = item['fallback_img']
-                            src = f"{source_site} (Org)"
+                            src = "DeathGrind (Original)"
                             clean_artist = item['artist']
                         
                         if img_url:
@@ -274,14 +274,14 @@ if submitted or st.session_state['found_items']:
             driver.quit()
             
         except Exception as e:
-            st.error(f"Browser crash: {e}")
+            st.error(f"Browser error: {e}")
 
         st.session_state['found_items'] = temp_results
         status_text.empty()
         bar.empty()
         
         if total_found == 0:
-             st.warning("Geen albums gevonden. Het kan zijn dat de pagina traag laadde of Cloudflare ons blokkeert.")
+             st.warning("Geen albums gevonden. Misschien laadde de pagina te traag.")
         else:
              st.rerun()
 
